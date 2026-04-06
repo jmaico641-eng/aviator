@@ -1,8 +1,33 @@
-node_modules
-.env
-betika
-betika.js
-betika.json
-raccoon.betika.conf
-version2
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+
+# Database
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Models (large files)
+models/
+
+# Logs
+logs/
 *.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Export files
+data/export.csv
+
+# Environment
+.env
+.env.local

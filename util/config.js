@@ -1,6 +1,8 @@
 const config = {
     NAVIGATION: {
-        BASE_URL: 'https://spribe.co/welcome',
+        BASE_URL: 'https://888bets.co.mz',
+        LOGIN_URL: 'https://888bets.co.mz/pt/auth/login',
+        AVIATOR_URL: 'https://888bets.co.mz/pt/game/aviator',
         TIMEOUT: 60000,
         RUN_DURATION: 24 * 60 * 60 * 1000 // 24 hours
     },
@@ -10,18 +12,27 @@ const config = {
         HISTORY_SIZE: 3  // Number of previous games to consider for average multiplier
     },
     SELECTORS: {
-        INITIAL: {
-            ACCORDION: '.accordion-body.shadow',
-            DEMO_BUTTON: '.btn.btn-primary.btn-lg.px-5.btn-demo.btn-danger',
-            AGE_BUTTON: '.btn.btn-md.btn-primary.btn-age'
+        LOGIN: {
+            USERNAME_INPUT: 'input[name="login"]',
+            PASSWORD_INPUT: 'input[name="password"]',
+            SUBMIT_BUTTON: 'button[type="submit"]',
+            ERROR_MESSAGE: '.login-error'
         },
-        GAME: {
+        AVIATOR: {
+            GAME_FRAME: 'iframe[class*="aviator"]',
             BUBBLE_MULTIPLIER: '.payouts-wrapper .bubble-multiplier',
             BALANCE: '.balance .amount',
             BET_BUTTON: 'div.buttons-block > button.btn.btn-success.bet.ng-star-inserted',
             CASHOUT_BUTTON: 'button.cashout.ng-star-inserted',
             BET_INPUT: 'input[inputmode="decimal"]',
-            CASHOUT_MULTIPLIER: '.amount span:first-child'
+            CASHOUT_MULTIPLIER: '.amount span:first-child',
+            DEMO_BUTTON: '.btn-demo',
+            PLAY_BUTTON: '.btn-play'
+        },
+        SITE: {
+            BALANCE_HEADER: '.user-balance',
+            DEPOSIT_BUTTON: '.btn-deposit',
+            MENU_BUTTON: '.user-menu'
         }
     },
     DATABASE: {

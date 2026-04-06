@@ -3,6 +3,8 @@ const config = require('./util/config');
 const logger = require('./util/logger');
 const GameMonitor = require('./game/gameMonitor');
 const BettingStrategy = require('./game/strategies');
+const AuthManager = require('./auth/authManager');
+const DashboardServer = require('./server/dashboardServer');
 const database = require('./database/database');
 const readline = require('readline');
 
@@ -62,70 +64,17 @@ async function customStrategySetup() {
 async function initializeBrowser() {
     const browser = await puppeteer.launch({
         headless: false,
-        defaultViewport: null, // Automatically adjust viewport
-        args: ['--start-maximized'] // Start with maximized window
+        defaultViewport: null,
+        args: [
+            '--start-maximized',
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage'
+        ]
     });
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(config.NAVIGATION.TIMEOUT);
     return { browser, page };
-}
-
-async function navigateInitialPages(page) {
-    await page.goto(config.NAVIGATION.BASE_URL);
-
-    for (const [name, selector] of Object.entries(config.SELECTORS.INITIAL)) {
-        try {
-            await page.waitForSelector(selector, { timeout: config.NAVIGATION.TIMEOUT });
-            await page.click(selector);
-            logger.info(`Clicked ${name}`);
-            // Add small delay between clicks
-            await page.waitForTimeout(1000);
-        } catch (error) {
-            logger.error(`Failed to click ${name}: ${error.message}`);
-            throw error;
-        }
-    }
-}
-
-async function handleNewTab(target, browser, strategyConfig) {
-    if (target.type() === 'page') {
-        const newPage = await target.page();
-        if (newPage) {
-            try {
-                await newPage.waitForNavigation({ timeout: config.NAVIGATION.TIMEOUT });
-                logger.info(`Navigated to game page: ${await newPage.url()}`);
-
-                // Pass both page and config to GameMonitor constructor
-                const gameMonitor = new GameMonitor(newPage, config);
-
-                // If you have a strategyConfig, update the strategy
-                if (strategyConfig) {
-                    gameMonitor.strategy = new BettingStrategy(strategyConfig);
-                }
-
-                // Setup page error handling
-                newPage.on('error', error => {
-                    logger.error(`Page error: ${error.message}`);
-                });
-
-                newPage.on('pageerror', error => {
-                    logger.error(`Page error: ${error.message}`);
-                });
-
-                gameMonitor.startMonitoring();
-
-                // Log strategy info
-                logger.info('Strategy Configuration:');
-                logger.info(`Initial Bet: ${strategyConfig.initialBet}`);
-                logger.info(`Target Multiplier: ${strategyConfig.targetMultiplier}`);
-                logger.info(`Stop Loss: ${strategyConfig.stopLoss}`);
-                logger.info(`Take Profit: ${strategyConfig.takeProfit}`);
-            } catch (error) {
-                logger.error(`Error in new tab: ${error.message}`);
-                await newPage.close();
-            }
-        }
-    }
 }
 
 async function setupGracefulShutdown(browser) {
@@ -136,6 +85,7 @@ async function setupGracefulShutdown(browser) {
             logger.info(`Received ${signal}, shutting down gracefully...`);
 
             try {
+                await DashboardServer.stop();
                 await browser.close();
                 // database.disconnect();
                 logger.info('Cleanup completed');
@@ -151,7 +101,11 @@ async function setupGracefulShutdown(browser) {
 
 async function main() {
     try {
-        logger.info('Starting Aviator Bot...');
+        logger.info('Starting Aviator Bot for 888bet...');
+
+        // Start dashboard server
+        logger.info('Initializing dashboard...');
+        await DashboardServer.start();
 
         // Get strategy configuration from user
         const strategyConfig = await selectStrategy();
@@ -166,22 +120,65 @@ async function main() {
         // Setup graceful shutdown
         await setupGracefulShutdown(browser);
 
-        await navigateInitialPages(page);
+        // Create auth manager
+        const authManager = new AuthManager(page);
 
-        // Setup new tab handling with selected strategy
-        browser.on('targetcreated', (target) => handleNewTab(target, browser, strategyConfig));
+        // Interactive login
+        console.log('\n=== 888bet Login ===');
+        const username = await askQuestion('Username: ');
+        const password = await askQuestion('Password: ');
 
-        // Set up cleanup
-        setTimeout(async () => {
+        logger.info('Attempting login...');
+        await authManager.login(username, password);
+
+        if (!authManager.isLoggedIn) {
+            logger.error('Login failed! Please check credentials and try again.');
             await browser.close();
-            // database.disconnect();
-            logger.info('Bot shutdown completed');
             rl.close();
-            process.exit(0);
-        }, config.NAVIGATION.RUN_DURATION);
+            process.exit(1);
+        }
+
+        logger.info('Login successful! Navigating to Aviator game...');
+        await authManager.navigateToAviator();
+
+        // Wait a moment for game to load
+        logger.info('Waiting for game to initialize...');
+        await page.waitForTimeout(5000);
+
+        // Create game monitor
+        const gameMonitor = new GameMonitor(page, config);
+        gameMonitor.strategy = new BettingStrategy(strategyConfig);
+
+        // Setup page error handling
+        page.on('error', error => {
+            logger.error(`Page error: ${error.message}`);
+        });
+
+        page.on('pageerror', error => {
+            logger.error(`Page error: ${error.message}`);
+        });
+
+        // Start monitoring
+        logger.info('Starting game monitoring...');
+        logger.info('Strategy Configuration:');
+        logger.info(`Initial Bet: ${strategyConfig.initialBet}`);
+        logger.info(`Target Multiplier: ${strategyConfig.targetMultiplier}`);
+        logger.info(`Stop Loss: ${strategyConfig.stopLoss}`);
+        logger.info(`Take Profit: ${strategyConfig.takeProfit}`);
+
+        gameMonitor.startMonitoring();
+
+        // Log balance periodically
+        setInterval(async () => {
+            const balance = await authManager.getBalance();
+            if (balance) {
+                logger.info(`Current balance: ${balance.toFixed(2)} MT`);
+            }
+        }, 60000); // Every minute
 
     } catch (error) {
         logger.error(`Bot initialization error: ${error.message}`);
+        logger.error(error.stack);
         rl.close();
         process.exit(1);
     }
