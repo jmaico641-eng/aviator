@@ -7,6 +7,7 @@ const RNGReader = require("../rng/rngReader");
 const NeuralNetworkPredictor = require("../ml/neuralNetwork");
 const ScikitLearnML = require("../ml/sklearnIntegration");
 const UltimatePredictor = require("../ml/ultimatePredictorIntegration");
+const AutoCollector = require("../ml/autoCollectorIntegration");
 const ProvablyFairExtractor = require("./provablyFairExtractor");
 const TimingAttackAnalyzer = require("../analysis/timingAttack");
 const DataCollector = require("../data/dataCollector");
@@ -28,7 +29,8 @@ class GameMonitor {
         });
         this.scikitLearn = ScikitLearnML;
         this.ultimatePredictor = UltimatePredictor;
-        this.pfExtractor = null; // Será inicializado com a page
+        this.autoCollector = AutoCollector;
+        this.pfExtractor = null;
         this.timingAnalyzer = new TimingAttackAnalyzer({ minSamples: 100, maxHistory: 5000 });
         this.dataCollector = DataCollector;
         this.betManager = new BetManager(config, this.strategy, this.statsTracker);
@@ -38,31 +40,37 @@ class GameMonitor {
         this.roundCounter = 0;
         this._mlTrainCounter = 0;
         this._pfSeedsCollected = 0;
+        this._currentClientSeed = null;
+        this._currentNonce = null;
         this.gameState = {
             inProgress: false,
             lastCrashPoint: null,
             betPlaced: false
         };
         
-        // Inicializa coletor de dados
+        // Inicializa sistemas
         this.dataCollector.initialize().catch(err => {
-            logger.error(`Erro ao inicializar data collector: ${err.message}`);
+            logger.error(`Erro data collector: ${err.message}`);
         });
         
-        // Verifica disponibilidade dos sistemas
+        this.autoCollector.checkAvailability().then(a => {
+            logger.info(`🤖 Auto Collector: ${a ? '✅ PRONTO' : '❌ NÃO'}`);
+        });
+        
         this.systemsReady = {
             scikitLearn: false,
-            ultimatePredictor: false
+            ultimatePredictor: false,
+            autoCollector: false
         };
         
         this.scikitLearn.checkAvailability().then(a => {
             this.systemsReady.scikitLearn = a;
-            logger.info(`🐍 Scikit-Learn: ${a ? '✅ PRONTO' : '❌ NÃO'}`);
+            logger.info(`🐍 Scikit-Learn: ${a ? '✅' : '❌'}`);
         });
         
         this.ultimatePredictor.checkAvailability().then(a => {
             this.systemsReady.ultimatePredictor = a;
-            logger.info(`🚀 Ultimate Predictor: ${a ? '✅ PRONTO' : '❌ NÃO'}`);
+            logger.info(`🚀 Ultimate Predictor: ${a ? '✅' : '❌'}`);
         });
     }
 
@@ -219,11 +227,22 @@ class GameMonitor {
                     }
                     logger.info(`Updated multiplier history: [${this.multiplierHistory.join(', ')}]`);
                     
-                    // Adiciona ao histórico do predictor
+                    // Adiciona aos sistemas
                     this.predictor.addObservation(this.previousMultiplier);
-                    
-                    // Adiciona ao RNG Reader
                     this.rngReader.addObservation(this.previousMultiplier, Date.now());
+                    
+                    // AUTO COLLECTOR: Coleta automaticamente
+                    const roundData = {
+                        round_id: `round_${this.roundCounter}`,
+                        client_seed: this._currentClientSeed || 'unknown',
+                        server_seed_hash: this._currentServerSeedHash || '',
+                        nonce: this.roundCounter,
+                        multiplier: this.previousMultiplier,
+                        server_seed: this._revealedServerSeed || null,
+                        timestamp: Date.now()
+                    };
+                    
+                    this.autoCollector.addRound(roundData);
                     
                     // Registra timing
                     this.timingAnalyzer.recordRound({
@@ -232,13 +251,13 @@ class GameMonitor {
                         timestamp: Date.now()
                     });
                     
-                    // Salva NO BANCO DE DADOS
+                    // Salva no banco
                     this.dataCollector.saveRound({
                         roundId: `round_${this.roundCounter}`,
                         multiplier: this.previousMultiplier,
                         timestamp: Date.now(),
-                        clientSeed: null, // Se disponível na página
-                        serverSeedHash: null,
+                        clientSeed: this._currentClientSeed,
+                        serverSeedHash: this._currentServerSeedHash,
                         nonce: this.roundCounter,
                         duration: null,
                         gapToNext: null
@@ -248,9 +267,8 @@ class GameMonitor {
                     this._mlTrainCounter++;
                     if (this._mlTrainCounter >= 50 && this.rngReader.data.length >= 100) {
                         this._mlTrainCounter = 0;
-                        logger.info('\n🐍 Iniciando treino Scikit-Learn...');
+                        logger.info('\n🐍 Treinando Scikit-Learn...');
                         
-                        // Treina em background (não bloqueante)
                         this.scikitLearn.trainModels([...this.rngReader.data])
                             .then(result => {
                                 if (result) {
@@ -354,92 +372,79 @@ class GameMonitor {
                 this._statsCounter = 0;
             }
 
-            // Check if we should place a bet based on ALL predictions
+            // Check if we should place a bet
             if (!this.gameState.betPlaced &&
                 gameState.betButton.exists &&
                 gameState.betButton.visible &&
                 !gameState.betButton.disabled &&
                 this.multiplierHistory.length >= (this.historySize - 1)) {
 
-                // ===== SISTEMA 99% TARGET =====
-                // Hierarquia de decisões:
-                
+                // ===== SISTEMA AUTOMÁTICO DE COLETA + PREVISÃO =====
                 let shouldBet = false;
                 let confidence = 0;
                 let reason = '';
                 let method = '';
+                let predictedValue = null;
 
-                // PRIORIDADE 1: Ultimate Predictor (seed prediction)
-                if (this.systemsReady.ultimatePredictor && this.rngReader.data.length >= 50) {
-                    const pfData = this.pfExtractor?.exportForPython() || {};
-                    
-                    const ultimatePred = await this.ultimatePredictor.predict(
-                        [...this.rngReader.data],
-                        pfData.seeds_history || [],
-                        this._currentClientSeed,
-                        this._currentNonce
-                    );
+                // PRIORIDADE 1: Auto Collector (seed pattern detection)
+                const autoPred = await this.autoCollector.getPrediction();
+                
+                if (autoPred?.prediction) {
+                    method = autoPred.prediction.type || 'AUTO_COLLECTOR';
+                    confidence = autoPred.prediction.confidence || 0;
+                    reason = autoPred.prediction.reason || '';
+                    predictedValue = autoPred.prediction.predicted_multiplier;
 
-                    if (ultimatePred) {
-                        method = ultimatePred.method || 'ULTIMATE';
-                        confidence = ultimatePred.confidence || 0;
-                        reason = ultimatePred.reason || '';
-
-                        // Se é previsão exata de seed OU confiança >= 95%
-                        if (this.ultimatePredictor.shouldBet(ultimatePred)) {
-                            shouldBet = true;
-                            logger.info(`\n🎯 ULTIMATE PREDICTION - APOSTAR!`);
-                            logger.info(`   Método: ${ultimatePred.method}`);
-                            logger.info(`   Confiança: ${(confidence * 100).toFixed(1)}%`);
-                            if (ultimatePred.predicted_multiplier) {
-                                logger.info(`   Previsão exata: ${ultimatePred.predicted_multiplier}x`);
-                            }
-                        }
+                    // Se tem previsão exata de seed OU confiança alta
+                    if (method === 'EXACT_SEED_PREDICTION' && confidence >= 0.8) {
+                        shouldBet = true;
+                        logger.info(`\n🎯 AUTO COLLECTOR - PREVISÃO EXATA!`);
+                        logger.info(`   Método: ${method}`);
+                        logger.info(`   Multiplicador previsto: ${predictedValue}x`);
+                        logger.info(`   Confiança: ${(confidence * 100).toFixed(1)}%`);
+                    } else if (method === 'ML_ENSEMBLE' && confidence >= 0.7) {
+                        shouldBet = autoPred.prediction.recommendation === 'APOSTAR';
+                        logger.info(`\n🤖 AUTO COLLECTOR - ML Ensemble`);
+                        logger.info(`   Confiança: ${(confidence * 100).toFixed(1)}%`);
                     }
                 }
 
-                // FALLBACK: Sistema combinado (se ultimate não disponível)
+                // FALLBACK: Outros sistemas
                 if (!shouldBet) {
-                    // Combina todas as previsões
                     let agreeCount = 0;
                     let totalSources = 0;
 
-                    // Fonte 1: Statistical Predictor
-                    if (prediction.recommendation && prediction.recommendation.startsWith('APOSTAR')) {
+                    // Statistical Predictor
+                    if (prediction.recommendation?.startsWith('APOSTAR')) {
                         agreeCount++;
                         confidence = prediction.confidence;
                         reason = prediction.reason;
                     }
                     totalSources++;
 
-                    // Fonte 2: Scikit-Learn
-                    if (mlPrediction && mlPrediction.classification) {
+                    // Scikit-Learn
+                    if (mlPrediction?.classification?.recommendation === 'APOSTAR') {
                         totalSources++;
-                        if (mlPrediction.classification.recommendation === 'APOSTAR') {
-                            agreeCount++;
-                            confidence = Math.max(confidence, mlPrediction.classification.confidence);
-                            reason = `Scikit-Learn: ${(mlPrediction.classification.confidence * 100).toFixed(0)}%`;
-                        }
+                        agreeCount++;
+                        confidence = Math.max(confidence, mlPrediction.classification.confidence);
+                        reason = `Scikit-Learn: ${(mlPrediction.classification.confidence * 100).toFixed(0)}%`;
                     }
 
-                    // Fonte 3: Neural Network
-                    if (nnPrediction) {
+                    // Neural Network
+                    if (nnPrediction?.confidence > 0.6) {
                         totalSources++;
-                        if (nnPrediction.confidence > 0.6) {
-                            agreeCount++;
-                            confidence = Math.max(confidence, nnPrediction.confidence);
-                            reason = `Neural Network: ${(nnPrediction.confidence * 100).toFixed(0)}%`;
-                        }
+                        agreeCount++;
+                        confidence = Math.max(confidence, nnPrediction.confidence);
+                        reason = `Neural Network: ${(nnPrediction.confidence * 100).toFixed(0)}%`;
                     }
 
-                    // Precisa 66%+ concordando E confiança > 70%
                     const agreementRatio = totalSources > 0 ? agreeCount / totalSources : 0;
                     shouldBet = agreementRatio >= 0.66 && confidence > 0.70;
                     method = 'ENSEMBLE_FALLBACK';
                 }
 
                 if (shouldBet) {
-                    logger.info(`💰 OPORTUNIDADE DETECTADA! ${reason}`);
+                    logger.info(`💰 OPORTUNIDADE! ${reason}`);
                     logger.info(`   Método: ${method}`);
                     logger.info(`   Confiança: ${(confidence * 100).toFixed(1)}%`);
                     
@@ -449,14 +454,14 @@ class GameMonitor {
                         this.gameState.inProgress = true;
                         
                         this._lastPrediction = {
-                            predicted: prediction.predicted,
+                            predicted: predictedValue || prediction.predicted,
                             confidence: confidence,
                             method: method,
                             reason: reason
                         };
                     }
                 } else {
-                    logger.debug(`⏸ Aguardando oportunidade... (confiança: ${(confidence * 100).toFixed(1)}%)`);
+                    logger.debug(`⏸ Aguardando... (confiança: ${(confidence * 100).toFixed(1)}%)`);
                 }
             }
 
@@ -486,22 +491,49 @@ class GameMonitor {
     }
 
     startMonitoring() {
-        logger.info('Starting game monitoring with ULTIMATE prediction system...');
-        logger.info('🎯 Sistema 99% Target ativado');
+        logger.info('🎯 Sistema AUTOMÁTICO de Coleta + Previsão ativado');
+        logger.info('🤖 Coletando seeds e analisando padrões...');
         
         // Inicializa Provably Fair Extractor
         this.pfExtractor = new ProvablyFairExtractor(this.page);
         
-        // Extrai Provably Fair periodicamente
+        // Extrai Provably Fair automaticamente
         setInterval(async () => {
             if (this.pfExtractor) {
                 const pfInfo = await this.pfExtractor.extractFairInfo();
-                if (pfInfo.clientSeed || pfInfo.serverSeedHash) {
+                if (pfInfo.clientSeed) {
+                    this._currentClientSeed = pfInfo.clientSeed;
+                }
+                if (pfInfo.serverSeedHash) {
+                    this._currentServerSeedHash = pfInfo.serverSeedHash;
+                }
+                if (pfInfo.nonce) {
+                    this._currentNonce = parseInt(pfInfo.nonce);
+                }
+                if (pfInfo.revealedSeed || pfInfo.serverSeed) {
+                    this._revealedServerSeed = pfInfo.revealedSeed || pfInfo.serverSeed;
                     this._pfSeedsCollected++;
-                    logger.info(`🔑 Provably Fair extraído #${this._pfSeedsCollected}`);
+                    logger.info(`🔑 Seed revelado #${this._pfSeedsCollected}`);
                 }
             }
-        }, 10000); // A cada 10 segundos
+        }, 5000); // A cada 5 segundos
+        
+        // Envia stats do Auto Collector para dashboard
+        setInterval(() => {
+            const collectorData = this.autoCollector.getDashboardData();
+            DashboardServer.broadcastStats({
+                statistics: {
+                    rounds: this.autoCollector.collectedRounds.length,
+                    lastValue: this.previousMultiplier || 0,
+                    mean: this.rngReader.data.length > 0 ? this.rngReader.data.reduce((a,b) => a+b,0) / this.rngReader.data.length : 0,
+                    max: this.rngReader.data.length > 0 ? Math.max(...this.rngReader.data) : 0,
+                    min: this.rngReader.data.length > 0 ? Math.min(...this.rngReader.data) : 0
+                },
+                seeds: collectorData.stats.seedsRevealed,
+                pattern: collectorData.stats.patternDetected,
+                accuracy: collectorData.currentPrediction ? collectorData.currentPrediction.confidence : 0
+            });
+        }, 10000);
         
         // Loop principal
         setInterval(() => this.monitorGame(), this.config.GAME.POLLING_INTERVAL);
